@@ -25,7 +25,7 @@ from src.agent_runtime import AgentRunResult, run_json_agent
 from src.schemas import QueryParserOutput, SynthesisOutput
 
 AGENT_NAME = "synthesis"
-MODEL = "claude-sonnet-5"
+MODEL = "gemini-2.5-flash"
 
 SynthesisResult = AgentRunResult
 

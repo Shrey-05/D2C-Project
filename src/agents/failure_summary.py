@@ -26,10 +26,12 @@ Feasibility).
 
 from __future__ import annotations
 
+from google.genai import types
+
 from src import prompt_loader
 
 AGENT_NAME = "failure_summary"
-MODEL = "claude-sonnet-5"
+MODEL = "gemini-2.5-flash"
 
 _PLACEHOLDER = "{{status_and_reason}}"
 
@@ -70,10 +72,6 @@ async def run_failure_summary(
         [market_sizing_status, competitor_landscape_status, financial_feasibility_status],
     )
 
-    response = await client.messages.create(
-        model=model,
-        max_tokens=512,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-    return "".join(block.text for block in response.content if block.type == "text").strip()
+    config = types.GenerateContentConfig(system_instruction=system_prompt)
+    response = await client.aio.models.generate_content(model=model, contents=user_prompt, config=config)
+    return (response.text or "").strip()

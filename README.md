@@ -1,6 +1,9 @@
-# Multi-Agent Consulting Analyst — Build #2, Complete
+# Multi-Agent Consulting Analyst — Gemini Edition
 
-All 5 agents wired, per `prompts.md`'s own "How these prompts fit together" diagram:
+All 5 agents wired, matching `prompts.md`'s data-flow diagram, running on
+**Google's Gemini API** instead of Claude — switched over specifically
+because Gemini has a genuine free tier (no credit card, ~1,500 requests/day
+on Flash models), which Anthropic's API doesn't.
 
 ```
 Query Parser
@@ -14,103 +17,79 @@ Query Parser
                                 yes -> Failure Summary -> plain-text status
 ```
 
-## A note on how this happened
+## What changed in the Gemini port
 
-You uploaded three files (`consulting_analyst.py`, `financial_feasibility.py`,
-`competitor_landscape.py`) written for **Build #1**'s internals — synchronous,
-`run_agent(name, user_turn, offline, fixture_key)`, `--offline`/`--material`
-flags. Build #2 is async, calls `AsyncAnthropic` directly, and validates
-against `schemas.py`/`prompt_loader.py`/`validator.py`. The uploaded files
-don't run against Build #2's code as-is. I used them as a spec of intent —
-matched against what `prompts.md` Sections 2–4 and 6 actually say — and wrote
-the real Build #2 equivalents from that, not from the uploaded files directly.
+- **SDK:** `anthropic.AsyncAnthropic` → `google.genai.Client` (via its
+  `.aio` async namespace)
+- **Model:** `claude-sonnet-5` → `gemini-2.5-flash` everywhere
+- **Search tool:** Claude's `web_search` needed a multi-turn tool-use loop
+  (model requests search, server executes, model continues) that
+  `agent_runtime.py` used to drive by hand. Gemini's Google Search
+  grounding is fully server-managed within a *single* `generate_content`
+  call — genuinely simpler, not just swapped syntax. `agent_runtime.py`'s
+  tool loop is gone; it's now one call, optionally two if a retry fires.
+- **JSON enforcement:** unchanged. Gemini can't combine `tools` with
+  `response_schema`-based structured output, so — same as the Claude
+  version — JSON shape is still enforced by prompt instruction +
+  `validator.py`'s extraction/retry path, not a native API feature.
+- **Env var:** `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` everywhere (CLI,
+  orchestrator, Streamlit app, `.env.example`)
 
-## What's here now
+`prompts.md` itself is untouched — the actual agent instructions are
+model-agnostic English, so nothing there needed to change.
 
-```
-src/
-├── schemas.py                    # all 5 agents' output schemas (built in milestone 1)
-├── prompt_loader.py               # parses prompts.md (milestone 1)
-├── validator.py                   # JSON extraction + retry payload (milestone 1)
-├── agent_runtime.py                # NEW: shared tool-loop/retry runner, used by
-│                                    #   market_sizing, competitor_landscape,
-│                                    #   financial_feasibility, synthesis
-├── orchestrator.py                 # UPDATED: now wires all 5 agents, not just 2
-└── agents/
-    ├── query_parser.py            # Agent 0 (milestone 1, unchanged)
-    ├── market_sizing.py           # Agent 1 (milestone 1, refactored onto agent_runtime.py)
-    ├── competitor_landscape.py     # NEW: Agent 2
-    ├── financial_feasibility.py    # NEW: Agent 3
-    ├── synthesis.py                 # NEW: Agent 4
-    └── failure_summary.py           # NEW: orchestrator-level meta-prompt
+## Getting a free key
 
-consulting_analyst.py              # NEW: top-level CLI, saves analysis.md + run_log.json
-                                     # (the file you meant by "output memo")
-
-tests/  — 45 tests total, all passing, all against a mocked AsyncAnthropic
-          client (still no real API key used anywhere in this build)
-├── test_schemas.py
-├── test_prompt_loader.py
-├── test_validator.py
-├── test_agents_mocked_client.py         # query_parser, market_sizing (milestone 1)
-├── test_new_agents_mocked_client.py     # NEW: competitor_landscape, financial_feasibility,
-│                                          #      synthesis, failure_summary
-└── test_orchestrator_mocked.py           # NEW: full 5-agent wiring — happy path,
-                                            #      SOM hand-off, 2-failure -> failure_summary,
-                                            #      rejected-input short-circuit
-```
+1. Go to **aistudio.google.com**
+2. Sign in with any Google account
+3. Click **Get API Key** → **Create API key**
+4. No credit card required — copy the key (starts with `AIza...`)
 
 ## How to test
 
-**Without a key** (proves the logic, not the model):
+**Without a key:**
 ```bash
 pip install -r requirements.txt
 python -m pytest tests/ -v
 ```
-45/45 passing as of this writing.
+45/45 passing, all against a mocked `google.genai.Client` — no real API key
+used anywhere in this build.
 
-**With a real key** (the actual thing):
+**With a real key:**
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+export GEMINI_API_KEY=AIza...
 python consulting_analyst.py --brief "Should a mid-market European specialty coffee roaster enter the US wholesale market?" --out ./coffee_run
 ```
-Saves `coffee_run/analysis.md` (the memo, or the failure summary, or a stopped-reason
-stub) and `coffee_run/run_log.json` (every agent's full validated output, for audit).
 
-Optional: `--material ./notes.txt` appends a text file's contents as extra
-context before the question reaches Query Parser.
+**As the web app (local):**
+```bash
+streamlit run frontend/app.py
+```
 
-Try a deliberately thin query (a narrow niche + narrow geography) to see
-Competitor Landscape legitimately return fewer than 4 competitors with an
-honest `search_coverage_note`, and Market Sizing legitimately return
-`confidence: "low"` — this is Section 6's "thin-coverage" failure-mode test
-case, and it's correct behavior, not a bug.
+**Deployed:** see the deploy steps discussed earlier in this project's
+conversation — same Streamlit Community Cloud process, just add
+`GEMINI_API_KEY` (not `ANTHROPIC_API_KEY`) and `APP_PASSWORD` to the
+deployment's Secrets.
 
-## What I verified vs. didn't — same caveat as milestone 1
+## What I verified vs. didn't
 
-**Verified by running it here:** all 45 tests pass, including the full
-5-agent wiring against a mocked client — the parallel Market
-Sizing/Competitor Landscape gather, the SOM value/confidence actually
-reaching Financial Feasibility's prompt, the 2-failure threshold correctly
-routing to `failure_summary` instead of `synthesis`, and a rejected
-non-business input correctly short-circuiting before any other agent runs.
+**Verified by running it here:** all 45 tests pass against the new mocked
+Gemini client shape (`response.text`, `response.candidates[0].grounding_metadata`).
+Every module imports cleanly. The CLI fails gracefully with no key set. The
+Streamlit app boots (HTTP 200) with the new imports.
 
-**Not verified — no API key in this environment:** no real model call was
-made anywhere in this build, same as milestone 1. The mocked tests prove the
-orchestration logic is right; they can't prove the real model's JSON comes
-back clean on the first try for all 5 agents, or that `claude-sonnet-5` and
-the web search tool behave as assumed. Run the live command above before
-trusting this further — and note the retry-doubles-token-cost caveat from
-milestone 1 now applies across 4 search-grounded/JSON-validated agents, not
-1.
+**Not verified — no real Gemini key in this environment:** no actual Gemini
+API call was made anywhere in this port. The mocked tests prove the
+orchestration and retry logic is correct against Gemini's *documented*
+response shape; they can't prove a real `gemini-2.5-flash` call returns
+clean JSON on the first try, or that Google Search grounding behaves
+exactly as mocked. Run the live command above before trusting this further.
 
-## Explicitly not built (per README_architecture.md Section 7's non-goals,
-and Section 5 step 7 not yet reached)
-
-- Streamlit frontend
-- `test_cases/` saved fixture runs (clean / thin-coverage / forced-malformed) —
-  the *logic* for all three is tested via mocks in `tests/`, but the
-  interview-demo artifact of saving three real API run JSONs to
-  `test_cases/` per Section 6 hasn't been done, since it needs a live key
-- Tavily/Serper fallback search — only the native Anthropic web_search tool
-  is wired
+**Known limits of the free tier worth knowing:**
+- Flash-class models only — Gemini's stronger "Pro" models aren't included
+  on the free tier as of this port
+- Rate-limited (~15 requests/minute on Flash) — fine for a resume demo used
+  occasionally, not for heavy concurrent traffic
+- Google's terms allow free-tier prompts/outputs to be used to improve their
+  models — worth knowing if you ever put non-public business context into
+  the "Optional supporting context" field

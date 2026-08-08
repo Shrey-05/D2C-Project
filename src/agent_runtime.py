@@ -1,15 +1,24 @@
 """
-Shared execution helper for every agent that: issues a system-prompted call
-(optionally with the web_search tool), drives the search tool-use loop to
-completion if used, validates the final JSON against a schema, and retries
-once via the schema-validator/retry-correction prompt on failure.
+Shared execution helper for every agent that: issues a Gemini
+generate_content call (optionally with the Google Search grounding tool),
+validates the final JSON against a schema, and retries once via the
+schema-validator/retry-correction prompt on failure.
 
-query_parser.py does NOT use this — it has to try two different schemas
-against the same raw output (QueryParserOutput or QueryParserError), which
-is genuinely different validation logic, not a variant of this shape.
-market_sizing.py, competitor_landscape.py, financial_feasibility.py, and
-synthesis.py all follow this exact shape, so it's factored out here rather
-than copy-pasted four times.
+Ported from an Anthropic Claude version. One genuine simplification fell
+out of the port, not just a mechanical swap: Claude's web_search tool
+needed a multi-turn tool-use loop (model calls the tool, server executes it,
+model gets the result back, model continues) that agent_runtime.py used to
+drive by hand. Gemini's Google Search grounding is fully server-managed
+within a single generate_content call — the model just returns final text
+with grounding_metadata attached describing what it searched. No client-
+visible tool_use/tool_result turns to loop over.
+
+One real constraint this port has to respect: Gemini does not support
+combining a `tools` list with `response_schema`-based structured output in
+the same call. So, same as the Claude version, JSON-shaped output here is
+still enforced by prompt instruction + validator.py's extraction/retry path,
+not by the API's native structured-output feature — that's not a limitation
+introduced by this port, it's inherent to using search grounding at all.
 """
 
 from __future__ import annotations
@@ -17,14 +26,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, Type, TypeVar
 
+from google.genai import types
 from pydantic import BaseModel
 
 from src import validator
 
 T = TypeVar("T", bound=BaseModel)
 
-WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
-MAX_TOOL_TURNS = 6  # guards against a runaway search loop; each turn is one API call
+GOOGLE_SEARCH_TOOL = types.Tool(google_search=types.GoogleSearch())
 
 
 @dataclass
@@ -36,48 +45,38 @@ class AgentRunResult:
     error: Optional[str] = None
 
 
-def _final_text(response) -> str:
-    return "".join(block.text for block in response.content if block.type == "text")
-
-
-async def _run_to_final_text(client, system_prompt: str, messages: list, model: str, use_search: bool):
-    """Drive a conversation to a final non-tool-use text response.
-
-    Returns (final_text, search_calls_made, messages_including_assistant_turns).
-    Anthropic's web search tool is server-executed but still surfaces as a
-    tool_use / tool_result pair in the message stream, so we loop turns
-    until stop_reason isn't "tool_use" — same pattern as any client-side
-    tool, even though search execution itself happens server-side.
+def _search_call_count(response) -> int:
+    """Gemini doesn't expose a literal call count; approximate it as the
+    number of distinct search queries grounding_metadata reports the model
+    actually issued. 0 if search wasn't used or nothing came back.
     """
-    search_calls = 0
-    tools = [WEB_SEARCH_TOOL] if use_search else None
+    try:
+        metadata = response.candidates[0].grounding_metadata
+        if metadata and metadata.web_search_queries:
+            return len(metadata.web_search_queries)
+    except (AttributeError, IndexError, TypeError):
+        pass
+    return 0
 
-    for _ in range(MAX_TOOL_TURNS):
-        kwargs = dict(model=model, max_tokens=2048, system=system_prompt, messages=messages)
-        if tools:
-            kwargs["tools"] = tools
-        response = await client.messages.create(**kwargs)
 
-        search_calls += sum(1 for b in response.content if getattr(b, "type", None) == "server_tool_use")
+async def _generate(client, model: str, contents, system_prompt: str, use_search: bool):
+    config_kwargs = {"system_instruction": system_prompt}
+    if use_search:
+        config_kwargs["tools"] = [GOOGLE_SEARCH_TOOL]
+    config = types.GenerateContentConfig(**config_kwargs)
+    return await client.aio.models.generate_content(model=model, contents=contents, config=config)
 
-        if response.stop_reason != "tool_use":
-            return _final_text(response), search_calls, messages
 
-        messages = messages + [{"role": "assistant", "content": response.content}]
-
-        has_client_tool_use = any(getattr(b, "type", None) == "tool_use" for b in response.content)
-        if not has_client_tool_use:
-            # Only server-side tool use happened; nothing for us to answer
-            # with a tool_result. Continue the loop so the next turn can
-            # keep searching or move on to its final answer.
-            messages = messages + [{"role": "user", "content": "Continue."}]
-            continue
-
-        # Defensive: these agents only ever get a server tool. If a future
-        # edit adds a client-side tool, don't hang the loop indefinitely.
-        return _final_text(response), search_calls, messages
-
-    return "", search_calls, messages
+def _retry_contents(user_prompt: str, previous_raw_text: str, retry_payload: str) -> list:
+    """Gemini's `contents` is a flat, role-tagged conversation list, unlike
+    Claude's separate system/messages split reused turn-by-turn. Rebuild the
+    short conversation explicitly for the correction turn.
+    """
+    return [
+        {"role": "user", "parts": [{"text": user_prompt}]},
+        {"role": "model", "parts": [{"text": previous_raw_text}]},
+        {"role": "user", "parts": [{"text": retry_payload}]},
+    ]
 
 
 async def run_json_agent(
@@ -88,23 +87,23 @@ async def run_json_agent(
     model: str,
     use_search: bool = False,
 ) -> AgentRunResult:
-    messages = [{"role": "user", "content": user_prompt}]
     raw_attempts: List[str] = []
 
-    raw_text, search_calls, messages = await _run_to_final_text(client, system_prompt, messages, model, use_search)
+    response = await _generate(client, model, user_prompt, system_prompt, use_search)
+    raw_text = response.text or ""
     raw_attempts.append(raw_text)
+    search_calls = _search_call_count(response)
 
     ok, parsed, err = validator.validate_agent_output(raw_text, schema_cls)
 
     if not ok:
         retry_payload = validator.build_retry_payload(raw_text, err or "unknown validation error")
-        retry_messages = messages + [{"role": "user", "content": retry_payload}]
-        retry_kwargs = dict(model=model, max_tokens=2048, system=system_prompt, messages=retry_messages)
-        if use_search:
-            retry_kwargs["tools"] = [WEB_SEARCH_TOOL]
-        retry_response = await client.messages.create(**retry_kwargs)
-        raw_text_2 = _final_text(retry_response)
+        retry_response = await _generate(
+            client, model, _retry_contents(user_prompt, raw_text, retry_payload), system_prompt, use_search
+        )
+        raw_text_2 = retry_response.text or ""
         raw_attempts.append(raw_text_2)
+        search_calls += _search_call_count(retry_response)
         ok, parsed, err = validator.validate_agent_output(raw_text_2, schema_cls)
 
     if not ok:

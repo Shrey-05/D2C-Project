@@ -26,7 +26,7 @@ import sys
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from anthropic import AsyncAnthropic
+from google import genai
 
 from src.agent_runtime import AgentRunResult
 from src.agents.competitor_landscape import run_competitor_landscape
@@ -79,7 +79,7 @@ class ConsultingOrchestrator:
     Section 5 step 7, not built yet).
     """
 
-    def __init__(self, client: AsyncAnthropic, model: str = "claude-sonnet-5", progress_callback: Optional[ProgressCallback] = None):
+    def __init__(self, client, model: str = "gemini-2.5-flash", progress_callback: Optional[ProgressCallback] = None):
         self.client = client
         self.model = model
         self._progress: ProgressCallback = progress_callback or (lambda stage, status: None)
@@ -209,12 +209,12 @@ def result_to_json(result: OrchestratorResult) -> dict:
 
 
 async def _main_async(question: str, out_path: Optional[str]) -> int:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        print("ANTHROPIC_API_KEY is not set — this makes real API + web-search calls.", file=sys.stderr)
+        print("GEMINI_API_KEY is not set — this makes real API + web-search calls.", file=sys.stderr)
         return 1
 
-    client = AsyncAnthropic(api_key=api_key)
+    client = genai.Client(api_key=api_key)
     orchestrator = ConsultingOrchestrator(client, progress_callback=_print_progress)
 
     print(f"Running: {question!r}", file=sys.stderr)

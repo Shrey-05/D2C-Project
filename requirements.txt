@@ -1,10 +1,10 @@
-anthropic>=0.121.0
+google-genai>=1.0.0
 pydantic>=2.7.0
 python-dotenv>=1.0.1
 pytest>=8.0.0
 pytest-asyncio>=0.24.0
 streamlit>=1.35.0
 
-# Not wired: only the native Anthropic web_search tool is used.
-# Uncomment if you add the fallback per README_architecture.md Section 2.
+# Not wired: Google Search grounding (used here) is Gemini's native
+# equivalent. No fallback search provider is wired in.
 # tavily-python>=0.3.0

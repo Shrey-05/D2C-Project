@@ -1,12 +1,14 @@
 """
 Exercises query_parser.py and market_sizing.py end-to-end against a mocked
-AsyncAnthropic client — no real API key or network needed. This is what
-actually proves the retry wiring and the search tool-use loop work, since
-test_validator.py and test_schemas.py only cover the pieces they call.
+Gemini client (google.genai.Client-shaped) — no real API key or network
+needed. This is what actually proves the retry wiring and the search-
+grounding path work, since test_validator.py and test_schemas.py only cover
+the pieces they call directly.
 
-The mock mimics just enough of the SDK's response shape (response.content
-as a list of objects with .type / .text, response.stop_reason) to drive
-query_parser.py and market_sizing.py's real code paths.
+The mock mimics just enough of the SDK's response shape (response.text,
+response.candidates[0].grounding_metadata.web_search_queries) to drive
+query_parser.py and market_sizing.py's real code paths, and
+client.aio.models.generate_content as the call site both files use.
 """
 
 from __future__ import annotations
@@ -21,8 +23,17 @@ from src.agents.market_sizing import run_market_sizing
 from src.agents.query_parser import run_query_parser
 
 
-def text_block(text: str) -> SimpleNamespace:
-    return SimpleNamespace(type="text", text=text)
+def gemini_response(text, search_queries=None):
+    grounding_metadata = SimpleNamespace(web_search_queries=search_queries) if search_queries else None
+    candidate = SimpleNamespace(grounding_metadata=grounding_metadata)
+    return SimpleNamespace(text=text, candidates=[candidate])
+
+
+def make_client(*responses):
+    client = SimpleNamespace()
+    generate_content = AsyncMock(side_effect=list(responses))
+    client.aio = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+    return client
 
 
 VALID_QP = {
@@ -49,66 +60,63 @@ VALID_MS = {
 }
 
 
-def make_client(*responses):
-    client = SimpleNamespace()
-    client.messages = SimpleNamespace(create=AsyncMock(side_effect=list(responses)))
-    return client
-
-
 @pytest.mark.asyncio
 async def test_query_parser_happy_path():
-    resp = SimpleNamespace(content=[text_block(json.dumps(VALID_QP))])
-    client = make_client(resp)
+    client = make_client(gemini_response(json.dumps(VALID_QP)))
     result = await run_query_parser(client, "Should we enter the US market?")
     assert result.status == "ok"
     assert result.output.industry == "specialty coffee wholesale"
-    assert client.messages.create.call_count == 1
+    assert client.aio.models.generate_content.call_count == 1
 
 
 @pytest.mark.asyncio
 async def test_query_parser_recovers_on_retry():
-    bad = SimpleNamespace(content=[text_block("not json at all, sorry")])
-    good = SimpleNamespace(content=[text_block(json.dumps(VALID_QP))])
+    bad = gemini_response("not json at all, sorry")
+    good = gemini_response(json.dumps(VALID_QP))
     client = make_client(bad, good)
     result = await run_query_parser(client, "Should we enter the US market?")
     assert result.status == "ok"
     assert len(result.raw_attempts) == 2
-    assert client.messages.create.call_count == 2
+    assert client.aio.models.generate_content.call_count == 2
 
 
 @pytest.mark.asyncio
 async def test_query_parser_rejects_non_business_question():
-    resp = SimpleNamespace(content=[text_block(json.dumps({"error": "not_a_business_question"}))])
-    client = make_client(resp)
+    client = make_client(gemini_response(json.dumps({"error": "not_a_business_question"})))
     result = await run_query_parser(client, "lol hi how are you")
     assert result.status == "rejected"
 
 
 @pytest.mark.asyncio
 async def test_query_parser_fails_after_one_retry_capped():
-    bad = SimpleNamespace(content=[text_block("garbage")])
+    bad = gemini_response("garbage")
     client = make_client(bad, bad)
     result = await run_query_parser(client, "Should we enter the US market?")
     assert result.status == "failed"
-    assert client.messages.create.call_count == 2  # capped: never a third attempt
+    assert client.aio.models.generate_content.call_count == 2  # capped: never a third attempt
 
 
 @pytest.mark.asyncio
-async def test_market_sizing_happy_path_no_search():
-    resp = SimpleNamespace(content=[text_block(json.dumps(VALID_MS))], stop_reason="end_turn")
-    client = make_client(resp)
+async def test_market_sizing_happy_path_no_search_reported():
+    client = make_client(gemini_response(json.dumps(VALID_MS)))
     result = await run_market_sizing(client, "specialty coffee", "USA", "cafes")
     assert result.status == "ok"
     assert result.output.TAM.value_usd == 5_000_000_000
+    assert result.search_calls_made == 0
 
 
 @pytest.mark.asyncio
-async def test_market_sizing_drives_search_tool_loop_to_completion():
-    search_block = SimpleNamespace(type="server_tool_use", name="web_search")
-    tool_turn = SimpleNamespace(content=[search_block], stop_reason="tool_use")
-    final_turn = SimpleNamespace(content=[text_block(json.dumps(VALID_MS))], stop_reason="end_turn")
-    client = make_client(tool_turn, final_turn)
+async def test_market_sizing_reports_search_calls_from_grounding_metadata():
+    resp = gemini_response(
+        json.dumps(VALID_MS),
+        search_queries=["US specialty coffee market size 2025", "TAM specialty coffee wholesale"],
+    )
+    client = make_client(resp)
     result = await run_market_sizing(client, "specialty coffee", "USA", "cafes")
     assert result.status == "ok"
-    assert result.search_calls_made == 1
-    assert client.messages.create.call_count == 2
+    assert result.search_calls_made == 2
+
+    # Confirm the Google Search grounding tool was actually attached to the call.
+    sent_config = client.aio.models.generate_content.call_args.kwargs["config"]
+    assert sent_config.tools is not None
+    assert len(sent_config.tools) == 1

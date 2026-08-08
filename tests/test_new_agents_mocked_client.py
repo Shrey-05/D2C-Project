@@ -17,16 +17,19 @@ from src.agents.competitor_landscape import run_competitor_landscape
 from src.agents.failure_summary import _fill_positional, run_failure_summary, status_reason
 from src.agents.financial_feasibility import run_financial_feasibility
 from src.agents.synthesis import run_synthesis
-from src.schemas import ConfidenceLevel, MarketSizingOutput, QueryParserOutput, ValueTag
+from src.schemas import MarketSizingOutput, QueryParserOutput
 
 
-def text_block(text: str) -> SimpleNamespace:
-    return SimpleNamespace(type="text", text=text)
+def gemini_response(text, search_queries=None):
+    grounding_metadata = SimpleNamespace(web_search_queries=search_queries) if search_queries else None
+    candidate = SimpleNamespace(grounding_metadata=grounding_metadata)
+    return SimpleNamespace(text=text, candidates=[candidate])
 
 
 def make_client(*responses):
     client = SimpleNamespace()
-    client.messages = SimpleNamespace(create=AsyncMock(side_effect=list(responses)))
+    generate_content = AsyncMock(side_effect=list(responses))
+    client.aio = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
     return client
 
 
@@ -86,8 +89,7 @@ VALID_SYNTHESIS = {
 
 @pytest.mark.asyncio
 async def test_competitor_landscape_happy_path():
-    resp = SimpleNamespace(content=[text_block(json.dumps(VALID_CL))], stop_reason="end_turn")
-    client = make_client(resp)
+    client = make_client(gemini_response(json.dumps(VALID_CL)))
     result = await run_competitor_landscape(client, "specialty coffee", "USA")
     assert result.status == "ok"
     assert result.output.confidence.value == "low"
@@ -96,12 +98,12 @@ async def test_competitor_landscape_happy_path():
 
 @pytest.mark.asyncio
 async def test_competitor_landscape_retries_on_bad_json():
-    bad = SimpleNamespace(content=[text_block("not json")], stop_reason="end_turn")
-    good = SimpleNamespace(content=[text_block(json.dumps(VALID_CL))], stop_reason="end_turn")
+    bad = gemini_response("not json")
+    good = gemini_response(json.dumps(VALID_CL))
     client = make_client(bad, good)
     result = await run_competitor_landscape(client, "specialty coffee", "USA")
     assert result.status == "ok"
-    assert client.messages.create.call_count == 2
+    assert client.aio.models.generate_content.call_count == 2
 
 
 # ---- financial_feasibility ----------------------------------------------
@@ -109,28 +111,24 @@ async def test_competitor_landscape_retries_on_bad_json():
 
 @pytest.mark.asyncio
 async def test_financial_feasibility_happy_path_with_som():
-    resp = SimpleNamespace(content=[text_block(json.dumps(VALID_FF))], stop_reason="end_turn")
-    client = make_client(resp)
+    client = make_client(gemini_response(json.dumps(VALID_FF)))
     result = await run_financial_feasibility(client, "specialty coffee", "USA", 10_000_000.0, "medium")
     assert result.status == "ok"
     assert len(result.output.scenarios) == 3
     assert result.output.recommendation_lean.value == "mixed"
 
     # Confirm the SOM value/confidence actually made it into the prompt sent.
-    sent_messages = client.messages.create.call_args.kwargs["messages"]
-    sent_user_text = sent_messages[0]["content"]
-    assert "10000000.0" in sent_user_text
-    assert "medium" in sent_user_text
+    sent_contents = client.aio.models.generate_content.call_args.kwargs["contents"]
+    assert "10000000.0" in sent_contents
+    assert "medium" in sent_contents
 
 
 @pytest.mark.asyncio
 async def test_financial_feasibility_passes_unavailable_when_som_is_none():
-    resp = SimpleNamespace(content=[text_block(json.dumps(VALID_FF))], stop_reason="end_turn")
-    client = make_client(resp)
+    client = make_client(gemini_response(json.dumps(VALID_FF)))
     await run_financial_feasibility(client, "specialty coffee", "USA", None, "unavailable")
-    sent_messages = client.messages.create.call_args.kwargs["messages"]
-    sent_user_text = sent_messages[0]["content"]
-    assert "unavailable" in sent_user_text
+    sent_contents = client.aio.models.generate_content.call_args.kwargs["contents"]
+    assert "unavailable" in sent_contents
 
 
 # ---- synthesis ------------------------------------------------------------
@@ -138,8 +136,7 @@ async def test_financial_feasibility_passes_unavailable_when_som_is_none():
 
 @pytest.mark.asyncio
 async def test_synthesis_happy_path_all_inputs_ok():
-    resp = SimpleNamespace(content=[text_block(json.dumps(VALID_SYNTHESIS))], stop_reason="end_turn")
-    client = make_client(resp)
+    client = make_client(gemini_response(json.dumps(VALID_SYNTHESIS)))
 
     parsed_query = QueryParserOutput(
         industry="specialty coffee wholesale",
@@ -158,7 +155,7 @@ async def test_synthesis_happy_path_all_inputs_ok():
         "confidence": "medium",
     }))
     cl = AgentRunResult(status="failed", output=None, error="validation failed twice")
-    ff = AgentRunResult(status="ok", output=None)  # status ok but output None shouldn't happen in practice; use real below
+    ff = AgentRunResult(status="ok", output=None)
 
     result = await run_synthesis(client, "Should we enter the US market?", parsed_query, ms, cl, ff)
     assert result.status == "ok"
@@ -166,10 +163,9 @@ async def test_synthesis_happy_path_all_inputs_ok():
 
     # The failed competitor_landscape result must be visible to the model as
     # a data gap, not silently dropped.
-    sent_messages = client.messages.create.call_args.kwargs["messages"]
-    sent_user_text = sent_messages[0]["content"]
-    assert '"status": "failed"' in sent_user_text
-    assert "validation failed twice" in sent_user_text
+    sent_contents = client.aio.models.generate_content.call_args.kwargs["contents"]
+    assert '"status": "failed"' in sent_contents
+    assert "validation failed twice" in sent_contents
 
 
 # ---- failure_summary --------------------------------------------------
@@ -199,12 +195,14 @@ def test_status_reason_failed():
 
 @pytest.mark.asyncio
 async def test_run_failure_summary_sends_three_distinct_statuses():
-    resp = SimpleNamespace(content=[text_block("Market sizing and competitor analysis completed. Financial feasibility could not be completed after two attempts due to malformed output. Try narrowing the geography.")])
-    client = make_client(resp)
+    client = make_client(gemini_response(
+        "Market sizing and competitor analysis completed. Financial feasibility "
+        "could not be completed after two attempts due to malformed output. "
+        "Try narrowing the geography."
+    ))
     text = await run_failure_summary(client, "ok", "ok", "failed: malformed output twice")
     assert "narrowing" in text.lower() or "completed" in text.lower()
 
-    sent_messages = client.messages.create.call_args.kwargs["messages"]
-    sent_user_text = sent_messages[0]["content"]
-    assert sent_user_text.count("ok") >= 2
-    assert "failed: malformed output twice" in sent_user_text
+    sent_contents = client.aio.models.generate_content.call_args.kwargs["contents"]
+    assert sent_contents.count("ok") >= 2
+    assert "failed: malformed output twice" in sent_contents

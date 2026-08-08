@@ -9,6 +9,12 @@ analysis. It has two possible valid output shapes, not one:
   isn't a business decision question at all.
 
 Both are attempted during validation before falling back to the retry path.
+
+This agent talks to the Gemini API directly (rather than through
+agent_runtime.run_json_agent) because the dual-schema validation above is
+genuinely different logic from every other agent's single-schema case —
+it's not a variant of the shared shape, so it isn't forced into it. Uses no
+search tool, same as before.
 """
 
 from __future__ import annotations
@@ -16,13 +22,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Union
 
-from anthropic import AsyncAnthropic
+from google.genai import types
 
 from src import prompt_loader, validator
 from src.schemas import QueryParserError, QueryParserOutput
 
 AGENT_NAME = "query_parser"
-MODEL = "claude-sonnet-5"
+MODEL = "gemini-2.5-flash"
 
 
 @dataclass
@@ -50,39 +56,31 @@ def _validate_either(raw_text: str):
     return False, None, err
 
 
-async def run_query_parser(
-    client: AsyncAnthropic, raw_user_input: str, model: str = MODEL
-) -> QueryParserResult:
+async def run_query_parser(client, raw_user_input: str, model: str = MODEL) -> QueryParserResult:
     system_prompt = prompt_loader.get_system_prompt(AGENT_NAME)
     user_prompt = prompt_loader.render_user_template(AGENT_NAME, raw_user_input=raw_user_input)
 
     raw_attempts = []
+    config = types.GenerateContentConfig(system_instruction=system_prompt)
 
-    response = await client.messages.create(
-        model=model,
-        max_tokens=1024,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-    raw_text = "".join(block.text for block in response.content if block.type == "text")
+    response = await client.aio.models.generate_content(model=model, contents=user_prompt, config=config)
+    raw_text = response.text or ""
     raw_attempts.append(raw_text)
 
     ok, parsed, err = _validate_either(raw_text)
 
     if not ok:
-        # One retry: same conversation, corrective user turn appended.
+        # One retry: same short conversation, corrective user turn appended.
         retry_payload = validator.build_retry_payload(raw_text, err or "unknown validation error")
-        retry_response = await client.messages.create(
-            model=model,
-            max_tokens=1024,
-            system=system_prompt,
-            messages=[
-                {"role": "user", "content": user_prompt},
-                {"role": "assistant", "content": raw_text},
-                {"role": "user", "content": retry_payload},
-            ],
+        retry_contents = [
+            {"role": "user", "parts": [{"text": user_prompt}]},
+            {"role": "model", "parts": [{"text": raw_text}]},
+            {"role": "user", "parts": [{"text": retry_payload}]},
+        ]
+        retry_response = await client.aio.models.generate_content(
+            model=model, contents=retry_contents, config=config
         )
-        raw_text_2 = "".join(block.text for block in retry_response.content if block.type == "text")
+        raw_text_2 = retry_response.text or ""
         raw_attempts.append(raw_text_2)
         ok, parsed, err = _validate_either(raw_text_2)
 

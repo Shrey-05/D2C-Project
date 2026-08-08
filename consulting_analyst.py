@@ -24,7 +24,7 @@ Usage:
   python consulting_analyst.py --brief "Should we open a second warehouse
       in Poland, or expand the existing one?" --material ./notes.txt --out ./warehouse_q
 
-  ANTHROPIC_API_KEY must be set in the environment.
+  GEMINI_API_KEY must be set in the environment.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ import json
 import os
 import sys
 
-from anthropic import AsyncAnthropic
+from google import genai
 
 from src.orchestrator import ConsultingOrchestrator, result_to_json
 
@@ -45,16 +45,16 @@ def _print_progress(stage: str, status: str) -> None:
 
 
 async def _run(brief: str, material_text: str) -> dict:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        print("Error: ANTHROPIC_API_KEY is not set.", file=sys.stderr)
+        print("Error: GEMINI_API_KEY is not set.", file=sys.stderr)
         sys.exit(1)
 
     raw_question = brief
     if material_text:
         raw_question = f"{brief}\n\nAdditional context/material provided by the user:\n{material_text}"
 
-    client = AsyncAnthropic(api_key=api_key)
+    client = genai.Client(api_key=api_key)
     orchestrator = ConsultingOrchestrator(client, progress_callback=_print_progress)
     result = await orchestrator.run(raw_question)
     return result, result_to_json(result)

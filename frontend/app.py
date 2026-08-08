@@ -4,7 +4,7 @@ working backend in a UI — this should be quick once the orchestration logic
 actually works").
 
 Run locally with:
-    export ANTHROPIC_API_KEY=sk-ant-...
+    export GEMINI_API_KEY=AIza...
     streamlit run frontend/app.py
 
 Deployed (e.g. Streamlit Community Cloud), the key comes from st.secrets
@@ -21,7 +21,7 @@ import os
 import sys
 
 import streamlit as st
-from anthropic import AsyncAnthropic
+from google import genai
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -77,12 +77,12 @@ STATUS_ICON = {"running": "⏳", "completed": "✅", "failed": "❌", "rejected"
 def _resolve_api_key() -> tuple[str | None, str]:
     """Returns (key, source_description)."""
     try:
-        secret_key = st.secrets.get("ANTHROPIC_API_KEY", None)
+        secret_key = st.secrets.get("GEMINI_API_KEY", None)
     except Exception:
         secret_key = None
     if secret_key:
         return secret_key, "deployment secrets"
-    env_key = os.environ.get("ANTHROPIC_API_KEY")
+    env_key = os.environ.get("GEMINI_API_KEY")
     if env_key:
         return env_key, "environment variable"
     return None, "none"
@@ -97,7 +97,7 @@ with st.sidebar:
         api_key = configured_key
     else:
         st.info("No key configured for this deployment. Paste your own to run a query.")
-        api_key = st.text_input("Anthropic API key", type="password", help="Used only for this session, never stored.")
+        api_key = st.text_input("Gemini API key", type="password", help="Used only for this session, never stored.")
     st.divider()
     st.caption(
         "Every run makes real API calls, including web search on 3 of the 5 "
@@ -130,7 +130,7 @@ if run_clicked:
             placeholders[stage].markdown(f"{icon} **{label}** — {status}")
 
     async def _run():
-        client = AsyncAnthropic(api_key=api_key)
+        client = genai.Client(api_key=api_key)
         orchestrator = ConsultingOrchestrator(client, progress_callback=progress_callback)
         raw_question = question
         if material.strip():

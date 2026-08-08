@@ -24,7 +24,7 @@ from src.agent_runtime import AgentRunResult, run_json_agent
 from src.schemas import FinancialFeasibilityOutput
 
 AGENT_NAME = "financial_feasibility"
-MODEL = "claude-sonnet-5"
+MODEL = "gemini-2.5-flash"
 
 FinancialFeasibilityResult = AgentRunResult
 

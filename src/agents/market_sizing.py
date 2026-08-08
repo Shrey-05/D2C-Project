@@ -15,7 +15,7 @@ from src.agent_runtime import AgentRunResult, run_json_agent
 from src.schemas import MarketSizingOutput
 
 AGENT_NAME = "market_sizing"
-MODEL = "claude-sonnet-5"
+MODEL = "gemini-2.5-flash"
 
 # Kept as an alias: orchestrator.py and existing tests reference this name.
 MarketSizingResult = AgentRunResult
