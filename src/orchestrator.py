@@ -79,7 +79,7 @@ class ConsultingOrchestrator:
     Section 5 step 7, not built yet).
     """
 
-    def __init__(self, client, model: str = "gemini-2.5-flash", progress_callback: Optional[ProgressCallback] = None):
+    def __init__(self, client, model: str = "gemini-flash-latest", progress_callback: Optional[ProgressCallback] = None):
         self.client = client
         self.model = model
         self._progress: ProgressCallback = progress_callback or (lambda stage, status: None)

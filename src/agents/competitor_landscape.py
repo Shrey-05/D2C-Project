@@ -22,7 +22,7 @@ from src.agent_runtime import AgentRunResult, run_json_agent
 from src.schemas import CompetitorLandscapeOutput
 
 AGENT_NAME = "competitor_landscape"
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-flash-latest"
 
 CompetitorLandscapeResult = AgentRunResult
 

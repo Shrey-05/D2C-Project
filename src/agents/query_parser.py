@@ -28,7 +28,7 @@ from src import prompt_loader, validator
 from src.schemas import QueryParserError, QueryParserOutput
 
 AGENT_NAME = "query_parser"
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-flash-latest"
 
 
 @dataclass

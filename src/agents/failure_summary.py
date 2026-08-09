@@ -31,7 +31,7 @@ from google.genai import types
 from src import prompt_loader
 
 AGENT_NAME = "failure_summary"
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-flash-latest"
 
 _PLACEHOLDER = "{{status_and_reason}}"
 
