@@ -13,7 +13,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from google.genai import errors
 
-from src.agent_runtime import RATE_LIMIT_MAX_RETRIES, generate_with_backoff
+from src.agent_runtime import (
+    MIN_CALL_INTERVAL_SECONDS,
+    RATE_LIMIT_BASE_DELAY_SECONDS,
+    RATE_LIMIT_MAX_RETRIES,
+    generate_with_backoff,
+)
 
 
 def make_api_error(code: int, status: str = "ERROR") -> errors.APIError:
@@ -77,3 +82,47 @@ async def test_backoff_delay_grows_between_attempts():
     delays = [call.args[0] for call in sleep_mock.call_args_list]
     assert delays == sorted(delays)
     assert len(set(delays)) == len(delays)  # each wait is strictly longer than the last
+
+
+# ---- proactive throttle (spacing between *different* calls) --------------
+
+
+@pytest.mark.asyncio
+async def test_first_call_after_reset_is_not_throttled():
+    """conftest.py resets the throttle clock before every test — the very
+    first call in a test should never wait, since nothing has 'recently'
+    happened as far as the throttle can tell."""
+    client = make_client(SimpleNamespace(text="fine"))
+    with patch("src.agent_runtime.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+        await generate_with_backoff(client, "gemini-flash-latest", "hi", config=None)
+    sleep_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_second_call_back_to_back_is_throttled():
+    """Two separate generate_with_backoff calls in immediate succession —
+    as if two different agents both fired at once — should have the second
+    one wait close to the full MIN_CALL_INTERVAL_SECONDS, since real
+    wall-clock time barely moved (asyncio.sleep is mocked, not actually
+    waiting) between the two calls."""
+    client = make_client(SimpleNamespace(text="one"), SimpleNamespace(text="two"))
+    with patch("src.agent_runtime.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+        await generate_with_backoff(client, "gemini-flash-latest", "hi", config=None)
+        await generate_with_backoff(client, "gemini-flash-latest", "hi", config=None)
+    assert sleep_mock.call_count == 1
+    waited = sleep_mock.call_args.args[0]
+    assert waited > MIN_CALL_INTERVAL_SECONDS - 1  # small slack for real test-execution time
+
+
+@pytest.mark.asyncio
+async def test_retries_do_not_get_double_throttled():
+    """A 429-triggered retry already waits its own exponential delay — it
+    must not ALSO pay the proactive throttle on top of that, or a single
+    call's retries would wait far longer than intended."""
+    client = make_client(make_api_error(429), SimpleNamespace(text="fine"))
+    with patch("src.agent_runtime.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+        await generate_with_backoff(client, "gemini-flash-latest", "hi", config=None)
+    # Exactly one sleep call: the backoff delay after the 429. The retry
+    # attempt itself must not trigger a second, throttle-driven sleep.
+    assert sleep_mock.call_count == 1
+    assert sleep_mock.call_args.args[0] == RATE_LIMIT_BASE_DELAY_SECONDS  # 5.0 * 2**0

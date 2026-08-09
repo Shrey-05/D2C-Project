@@ -47,20 +47,26 @@ model-agnostic English, so nothing there needed to change.
 
 ## Handling rate limits
 
-The free tier's request-per-minute limit is tight (as low as 5-15), and a
-single "Analyze" click makes 5-10 API calls (one per agent, sometimes two
-if a retry fires). If you hit a 429, `agent_runtime.py`'s
-`generate_with_backoff()` automatically retries up to 3 times with growing
-delays (5s, 10s, 20s) before giving up — this is separate from
-`validator.py`'s retry, which is for the *model's own output* being
-malformed, not the request itself being rejected by infrastructure. Only
-429s get this treatment; anything else (bad model name, invalid key, a
-genuine 500) fails immediately rather than burning 3 retries on a
-guaranteed-identical failure.
+Two layers, working together:
 
-If you still see a 429 after those retries, you've likely hit the **daily**
-quota from repeated testing — that resets around midnight Pacific Time, not
-within a minute.
+1. **Proactive throttling** — every call is spaced at least
+   `MIN_CALL_INTERVAL_SECONDS` (default 13s) apart, process-wide, via
+   `agent_runtime.py`'s `_throttle()`. A single pipeline run makes 5-10
+   calls; without this, they'd fire in a burst and could trip a 5-15
+   requests/minute free-tier limit before any single call had even failed
+   once. Configurable via the `GEMINI_MIN_CALL_INTERVAL_SECONDS` env var if
+   your account's actual limit is more (or less) generous.
+2. **Reactive backoff** — if a 429 slips through anyway,
+   `generate_with_backoff()` retries the *same unchanged request* up to 3
+   times with growing delays (5s, 10s, 20s) before giving up. This is
+   separate from `validator.py`'s retry, which is for the *model's own
+   output* being malformed — not the request itself being rejected by
+   infrastructure.
+
+**Neither of these can fix an exhausted *daily* quota** — no code can
+manufacture free quota that doesn't exist. If you've tested the pipeline
+many times in one day and still see 429s after waiting a couple of minutes,
+that's almost certainly it — it resets around midnight Pacific Time.
 
 ## How to test
 

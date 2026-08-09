@@ -24,6 +24,8 @@ introduced by this port, it's inherent to using search grounding at all.
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Type, TypeVar
 
@@ -45,16 +47,55 @@ GOOGLE_SEARCH_TOOL = types.Tool(google_search=types.GoogleSearch())
 RATE_LIMIT_MAX_RETRIES = 3
 RATE_LIMIT_BASE_DELAY_SECONDS = 5.0
 
+# Proactive throttling, not just reactive retry. A single pipeline run makes
+# 5-10 calls in quick succession (one per agent, sometimes two on a retry,
+# two concurrently during the Market Sizing / Competitor Landscape gather) —
+# on a free-tier limit as low as 5 requests/minute, that alone can trigger a
+# 429 before any single call has even failed once. Spacing every call out by
+# a minimum interval, process-wide, avoids manufacturing the problem the
+# retry logic above exists to clean up after. Configurable because free-tier
+# limits vary by model and change over time (Google tightened them 50-80% in
+# December 2025 alone) — if your account's limit is more generous, lower it;
+# if you're still seeing 429s at the default, raise it.
+MIN_CALL_INTERVAL_SECONDS = float(os.environ.get("GEMINI_MIN_CALL_INTERVAL_SECONDS", "13"))
+
+_throttle_lock = asyncio.Lock()
+_last_call_at: float = 0.0
+
+
+async def _throttle() -> None:
+    """Blocks until at least MIN_CALL_INTERVAL_SECONDS has passed since the
+    last call anywhere in the process. Holding the lock across the sleep is
+    intentional — it serializes concurrent callers (e.g. the Market
+    Sizing / Competitor Landscape gather) through the same spacing, rather
+    than letting both check the clock, see it's clear, and fire together.
+    """
+    global _last_call_at
+    async with _throttle_lock:
+        wait = MIN_CALL_INTERVAL_SECONDS - (time.monotonic() - _last_call_at)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_call_at = time.monotonic()
+
 
 async def generate_with_backoff(client, model: str, contents, config):
-    """client.aio.models.generate_content, retried with exponential backoff
-    specifically on 429 (RESOURCE_EXHAUSTED). Any other error — a bad model
-    name, an invalid key, a 500 — is raised immediately on the first
-    attempt, since retrying those just wastes 3x the wait for the same
-    guaranteed failure.
+    """client.aio.models.generate_content, throttled proactively (see
+    _throttle above) and retried with exponential backoff specifically on
+    429 (RESOURCE_EXHAUSTED). Any other error — a bad model name, an invalid
+    key, a 500 — is raised immediately on the first attempt, since retrying
+    those just wastes 3x the wait for the same guaranteed failure.
     """
     last_error: Optional[errors.APIError] = None
     for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
+        if attempt == 0:
+            # Only throttle before the *first* attempt of a given call. A
+            # retry after a 429 already waits its own (larger) exponential
+            # delay below, which exceeds MIN_CALL_INTERVAL_SECONDS in every
+            # case that matters — re-throttling on top of that would just
+            # double the wait for no benefit. Throttling exists to space out
+            # *different* calls (e.g. across agents), not repeat attempts of
+            # the same one.
+            await _throttle()
         try:
             return await client.aio.models.generate_content(model=model, contents=contents, config=config)
         except errors.APIError as e:
