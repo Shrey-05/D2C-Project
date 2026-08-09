@@ -29,6 +29,7 @@ from __future__ import annotations
 from google.genai import types
 
 from src import prompt_loader
+from src.agent_runtime import generate_with_backoff
 
 AGENT_NAME = "failure_summary"
 MODEL = "gemini-flash-latest"
@@ -73,5 +74,5 @@ async def run_failure_summary(
     )
 
     config = types.GenerateContentConfig(system_instruction=system_prompt)
-    response = await client.aio.models.generate_content(model=model, contents=user_prompt, config=config)
+    response = await generate_with_backoff(client, model, user_prompt, config)
     return (response.text or "").strip()

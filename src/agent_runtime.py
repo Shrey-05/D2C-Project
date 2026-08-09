@@ -23,10 +23,11 @@ introduced by this port, it's inherent to using search grounding at all.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import List, Optional, Type, TypeVar
 
-from google.genai import types
+from google.genai import errors, types
 from pydantic import BaseModel
 
 from src import validator
@@ -34,6 +35,35 @@ from src import validator
 T = TypeVar("T", bound=BaseModel)
 
 GOOGLE_SEARCH_TOOL = types.Tool(google_search=types.GoogleSearch())
+
+# Rate-limit retry is deliberately separate from validator.py's retry: that
+# one exists because the *model's own output* was malformed and gets a
+# corrective prompt; this one exists because the *request itself* was
+# rejected by infrastructure (429 RESOURCE_EXHAUSTED) before the model ever
+# saw it. Same request, unchanged, just resent after a short wait — nothing
+# here should ever touch prompt content.
+RATE_LIMIT_MAX_RETRIES = 3
+RATE_LIMIT_BASE_DELAY_SECONDS = 5.0
+
+
+async def generate_with_backoff(client, model: str, contents, config):
+    """client.aio.models.generate_content, retried with exponential backoff
+    specifically on 429 (RESOURCE_EXHAUSTED). Any other error — a bad model
+    name, an invalid key, a 500 — is raised immediately on the first
+    attempt, since retrying those just wastes 3x the wait for the same
+    guaranteed failure.
+    """
+    last_error: Optional[errors.APIError] = None
+    for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
+        try:
+            return await client.aio.models.generate_content(model=model, contents=contents, config=config)
+        except errors.APIError as e:
+            is_rate_limit = getattr(e, "code", None) == 429
+            if not is_rate_limit or attempt == RATE_LIMIT_MAX_RETRIES:
+                raise
+            last_error = e
+            await asyncio.sleep(RATE_LIMIT_BASE_DELAY_SECONDS * (2**attempt))
+    raise last_error  # unreachable in practice; satisfies type checkers
 
 
 @dataclass
@@ -64,7 +94,7 @@ async def _generate(client, model: str, contents, system_prompt: str, use_search
     if use_search:
         config_kwargs["tools"] = [GOOGLE_SEARCH_TOOL]
     config = types.GenerateContentConfig(**config_kwargs)
-    return await client.aio.models.generate_content(model=model, contents=contents, config=config)
+    return await generate_with_backoff(client, model, contents, config)
 
 
 def _retry_contents(user_prompt: str, previous_raw_text: str, retry_payload: str) -> list:

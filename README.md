@@ -45,6 +45,23 @@ model-agnostic English, so nothing there needed to change.
 3. Click **Get API Key** → **Create API key**
 4. No credit card required — copy the key (starts with `AIza...`)
 
+## Handling rate limits
+
+The free tier's request-per-minute limit is tight (as low as 5-15), and a
+single "Analyze" click makes 5-10 API calls (one per agent, sometimes two
+if a retry fires). If you hit a 429, `agent_runtime.py`'s
+`generate_with_backoff()` automatically retries up to 3 times with growing
+delays (5s, 10s, 20s) before giving up — this is separate from
+`validator.py`'s retry, which is for the *model's own output* being
+malformed, not the request itself being rejected by infrastructure. Only
+429s get this treatment; anything else (bad model name, invalid key, a
+genuine 500) fails immediately rather than burning 3 retries on a
+guaranteed-identical failure.
+
+If you still see a 429 after those retries, you've likely hit the **daily**
+quota from repeated testing — that resets around midnight Pacific Time, not
+within a minute.
+
 ## How to test
 
 **Without a key:**

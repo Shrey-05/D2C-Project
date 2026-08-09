@@ -25,6 +25,7 @@ from typing import Optional, Union
 from google.genai import types
 
 from src import prompt_loader, validator
+from src.agent_runtime import generate_with_backoff
 from src.schemas import QueryParserError, QueryParserOutput
 
 AGENT_NAME = "query_parser"
@@ -63,7 +64,7 @@ async def run_query_parser(client, raw_user_input: str, model: str = MODEL) -> Q
     raw_attempts = []
     config = types.GenerateContentConfig(system_instruction=system_prompt)
 
-    response = await client.aio.models.generate_content(model=model, contents=user_prompt, config=config)
+    response = await generate_with_backoff(client, model, user_prompt, config)
     raw_text = response.text or ""
     raw_attempts.append(raw_text)
 
@@ -77,9 +78,7 @@ async def run_query_parser(client, raw_user_input: str, model: str = MODEL) -> Q
             {"role": "model", "parts": [{"text": raw_text}]},
             {"role": "user", "parts": [{"text": retry_payload}]},
         ]
-        retry_response = await client.aio.models.generate_content(
-            model=model, contents=retry_contents, config=config
-        )
+        retry_response = await generate_with_backoff(client, model, retry_contents, config)
         raw_text_2 = retry_response.text or ""
         raw_attempts.append(raw_text_2)
         ok, parsed, err = _validate_either(raw_text_2)
